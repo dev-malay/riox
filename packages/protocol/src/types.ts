@@ -1,4 +1,4 @@
-export type EngineName = "mock";
+export type EngineName = "mock" | "openrouter";
 
 export type Role = "user" | "assistant";
 
@@ -14,4 +14,10 @@ export interface ChatMessage {
   role: Role;
   content: string;
   createdAt: string;
+}
+
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
 }
