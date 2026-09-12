@@ -1,6 +1,7 @@
 {
   "$schema": "https://turborepo.dev/schema.json",
   "ui": "tui",
+  "globalEnv": ["OPENROUTER_API_KEY", "RIOX_MODEL"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],

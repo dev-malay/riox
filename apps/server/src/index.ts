@@ -1,5 +1,5 @@
 import { type ServerWebSocket, serve } from "bun";
-import { createSession, ENGINE, runPrompt, VERSION } from "@riox/agent";
+import { createSession, ENGINE, resolveModel, runPrompt, VERSION } from "@riox/agent";
 import {parseClientEvent,
   serializeServerEvent,
   type ServerEvent,
@@ -52,6 +52,7 @@ serve({
         {
           ok: true,
           engine: ENGINE,
+          model: resolveModel(),
           version: VERSION,
           sessions: sessions.size,
           time: new Date().toISOString(),
