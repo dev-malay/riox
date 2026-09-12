@@ -17,11 +17,13 @@
     "check-types": "tsc --noEmit"
   },
   "dependencies": {
-    "@riox/protocol": "*"
+    "@riox/protocol": "*",
+    "openai": "^5.0.0"
   },
   "devDependencies": {
     "@repo/eslint-config": "*",
     "@repo/typescript-config": "*",
+    "@types/node": "26.4.1",
     "eslint": "10.9.1",
     "typescript": "7.0.2"
   }
