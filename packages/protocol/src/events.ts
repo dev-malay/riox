@@ -4,6 +4,10 @@ export type ClientEvent =
   | { type: "chat.send"; prompt: string; sessionId?: string }
   | { type: "session.new"; title?: string };
 
+export type ToolEvent =
+  | { type: "tool.start"; name: string; summary: string }
+  | { type: "tool.result"; name: string; ok: boolean; preview: string };
+
 export type ServerEvent =
   | { type: "session.created"; session: Session }
   | {
@@ -18,7 +22,8 @@ export type ServerEvent =
       messageId: string;
       content: string;
     }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | ToolEvent;
 
 /** Strict-parse an inbound WebSocket frame. Returns null when invalid. */
 export function parseClientEvent(raw: unknown): ClientEvent | null {
