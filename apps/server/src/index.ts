@@ -36,7 +36,15 @@ async function handleChatSend(
   if (created) send(ws, { type: "session.created", session });
   const messageId = crypto.randomUUID();
   let content = "";
-  for await (const delta of runPrompt(prompt)) {
+  for await (const delta of runPrompt(prompt, {
+    onToolEvent: (event) => {
+      if (event.type === "tool.start") {
+        send(ws, { type: "tool.start", name: event.name, summary: event.summary });
+      } else {
+        send(ws, { type: "tool.result", name: event.name, ok: event.ok, preview: event.preview });
+      }
+    },
+  })) {
     content += delta;
     send(ws, { type: "chat.delta", sessionId: session.id, messageId, delta });
   }
