@@ -1,11 +1,17 @@
 #!/usr/bin/env bun
-import { ENGINE, resolveModel, runPrompt } from "@riox/agent";
-import type { TokenUsage } from "@riox/protocol";
+import { DEFAULT_MAX_TURNS, ENGINE, resolveModel, runPrompt } from "@riox/agent";
+import type { TokenUsage, ToolEvent } from "@riox/protocol";
 
 const VERSION = "0.1.0";
 const SERVER_URL = "http://localhost:3101";
 
 type OutputFormat = "text" | "json";
+
+interface ToolTrace {
+  name: string;
+  ok: boolean;
+  preview: string;
+}
 
 function printHelp(): void {
   console.log(`riox ${VERSION} - coding agent
@@ -19,10 +25,12 @@ Usage:
 Options:
   --model <id>                    Model override (default: RIOX_MODEL or built-in)
   --output-format <text|json>     Output shape for -p (default: text)
+  --max-turns <n>                 Max tool turns per run (default ${DEFAULT_MAX_TURNS})
+  --dangerously-skip-permissions  Approve all tools without asking
 
 Examples:
   riox -p "hello riox"
-  riox -p "fix this" --model other/model:free
+  riox -p "list src files" --max-turns 5
   riox -p "hi" --output-format json
   riox --health`);
 }
@@ -39,9 +47,28 @@ async function cmdHealth(): Promise<void> {
   console.log(JSON.stringify(body));
 }
 
-async function cmdPrint(prompt: string, model: string | undefined, format: OutputFormat): Promise<void> {
+function showToolEvent(event: ToolEvent): void {
+  if (event.type === "tool.start") {
+    process.stderr.write(`● ${event.name} ${event.summary}\n`);
+  } else {
+    process.stderr.write(`  ${event.ok ? "→ ok" : "→ FAILED"} ${event.preview.split("\n")[0] ?? ""}\n`);
+  }
+}
+
+async function cmdPrint(
+  prompt: string,
+  model: string | undefined,
+  format: OutputFormat,
+  maxTurns: number,
+  skipPermissions: boolean,
+): Promise<void> {
   if (format === "text") {
-    for await (const delta of runPrompt(prompt, { model })) {
+    for await (const delta of runPrompt(prompt, {
+      model,
+      maxTurns,
+      skipPermissions,
+      onToolEvent: showToolEvent,
+    })) {
       process.stdout.write(delta);
     }
     process.stdout.write("\n");
@@ -49,13 +76,30 @@ async function cmdPrint(prompt: string, model: string | undefined, format: Outpu
   }
   let content = "";
   let usage: TokenUsage | null = null;
+  const tools: ToolTrace[] = [];
   for await (const delta of runPrompt(prompt, {
     model,
-    onUsage: (u) => {usage = u}
+    maxTurns,
+    skipPermissions,
+    onUsage: (u) => {
+      usage = u;
+    },
+    onToolEvent: (event) => {
+      if (event.type === "tool.result") {
+        tools.push({ name: event.name, ok: event.ok, preview: event.preview });
+      }
+    },
   })) {
     content += delta;
   }
-  console.log(JSON.stringify({ content, model: resolveModel(model), usage }));
+  console.log(JSON.stringify({ content, model: resolveModel(model), usage, tools }));
+}
+
+function parseMaxTurns(value: string | undefined): number {
+  if (value === undefined || value === "") throw new Error("--max-turns needs a value");
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) throw new Error("--max-turns must be a positive integer");
+  return n;
 }
 
 async function main(): Promise<void> {
@@ -76,6 +120,8 @@ async function main(): Promise<void> {
   if (head === "-p" || head === "--print") {
     let model: string | undefined;
     let format: OutputFormat = "text";
+    let maxTurns = DEFAULT_MAX_TURNS;
+    let skipPermissions = false;
     const promptParts: string[] = [];
     const rest = args.slice(1);
     for (let i = 0; i < rest.length; i++) {
@@ -92,11 +138,16 @@ async function main(): Promise<void> {
         }
         format = value;
         i++;
+      } else if (arg === "--max-turns") {
+        maxTurns = parseMaxTurns(rest[i + 1]);
+        i++;
+      } else if (arg === "--dangerously-skip-permissions") {
+        skipPermissions = true;
       } else if (arg !== undefined) {
         promptParts.push(arg);
       }
-    };
-    await cmdPrint(promptParts.join(" "), model, format);
+    }
+    await cmdPrint(promptParts.join(" "), model, format, maxTurns, skipPermissions);
     return;
   }
   throw new Error(`unknown command "${head}" — see riox --help`);
