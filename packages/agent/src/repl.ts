@@ -36,11 +36,10 @@ interface ReplContext {
 
 function printBanner(): void {
   console.log(`
-\x1b[96m    ▄▄▄▄▄ ▄▄▄ ▄▄▄   \x1b[0mriox \x1b[90mv0.1.0\x1b[0m
-\x1b[96m   ▀▀▀██▀▀▀█ ▀▀█   \x1b[0mType \x1b[1m/help\x1b[0m for commands
-\x1b[96m     ▄██   ▄██     \x1b[0mCtrl+C to interrupt, Ctrl+D to exit
-\x1b[96m    ▄██▀  ▄██▀     \x1b[0m
-\x1b[96m   ▀▀▀▀▀ ▀▀▀       \x1b[0m`);
+\x1b[38;2;100;200;255mriox \x1b[90mv0.1.0\x1b[0m
+\x1b[90m────────────────────────────────────────\x1b[0m
+  Type \x1b[1m/help\x1b[0m for commands  |  Ctrl+C to interrupt  |  Ctrl+D to exit
+`);
 }
 
 function printHelp(): void {
