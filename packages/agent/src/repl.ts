@@ -1,6 +1,13 @@
 import { createInterface, Interface } from "node:readline";
-import { DEFAULT_MAX_TURNS, runPrompt, createSession, resolveModel } from "./index.js";
-import type { TokenUsage, ToolEvent, Session } from "@riox/protocol";
+import {
+  DEFAULT_MAX_TURNS,
+  runPrompt,
+  createSession,
+  resolveModel,
+  sessionStore,
+  resumeSession,
+} from "./index.js";
+import type { TokenUsage, ToolEvent, Session, ChatMessage } from "@riox/protocol";
 
 export const CODING_SYSTEM_PROMPT = `You are riox, a coding agent that works directly in this repository.
 
@@ -32,6 +39,8 @@ interface ReplContext {
   skipPermissions: boolean;
   history: string[];
   rl: Interface;
+  messages: ChatMessage[];
+  tools: ToolEvent[];
 }
 
 function printBanner(): void {
@@ -74,6 +83,8 @@ async function handleSlash(line: string, ctx: ReplContext): Promise<boolean> {
     compact: async () => {
       console.log("\x1b[90m[compact not yet implemented - clears local history only]\x1b[0m");
       ctx.history = [];
+      ctx.messages = [];
+      ctx.tools = [];
     },
     model: async () => {
       if (!arg) {
@@ -106,7 +117,7 @@ async function handleSlash(line: string, ctx: ReplContext): Promise<boolean> {
       console.log(`Model: ${ctx.model}`);
       console.log(`Max turns: ${ctx.maxTurns}`);
       console.log(`Skip perms: ${ctx.skipPermissions}`);
-      console.log(`History: ${ctx.history.length} messages`);
+      console.log(`Messages: ${ctx.messages.length}`);
     },
     exit: async () => {
       console.log("bye");
@@ -115,7 +126,7 @@ async function handleSlash(line: string, ctx: ReplContext): Promise<boolean> {
     quit: async () => {
       console.log("bye");
       process.exit(0);
-    }
+    },
   };
   const handler = handlers[cmd] ?? handlers.help;
   if (!handler) {
@@ -131,18 +142,91 @@ async function handleSlash(line: string, ctx: ReplContext): Promise<boolean> {
   return true;
 }
 
+function toChatMessage(role: "user" | "assistant", content: string, sessionId: string): ChatMessage {
+  return {
+    id: crypto.randomUUID(),
+    sessionId,
+    role,
+    content,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+async function saveSession(ctx: ReplContext): Promise<void> {
+  const meta = {
+    ...ctx.session,
+    cwd: ctx.cwd,
+    model: ctx.model,
+    maxTurns: ctx.maxTurns,
+    skipPermissions: ctx.skipPermissions,
+  };
+  await sessionStore.save(meta, ctx.messages, ctx.tools);
+}
+
 export async function runRepl(options: {
   model?: string;
   maxTurns?: number;
   skipPermissions?: boolean;
   cwd?: string;
+  sessionId?: string;
+  resume?: boolean;
 }): Promise<void> {
   const cwd = options.cwd ?? process.cwd();
   const model = resolveModel(options.model);
   const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
   const skipPermissions = options.skipPermissions ?? false;
 
-  const session = createSession("REPL session");
+  let session: Session;
+  let messages: ChatMessage[] = [];
+  let tools: ToolEvent[] = [];
+
+  if (options.resume && options.sessionId) {
+    const loaded = await resumeSession(options.sessionId, {
+      model: options.model,
+      maxTurns: options.maxTurns,
+      skipPermissions: options.skipPermissions,
+      cwd: options.cwd
+    });
+    if (loaded) {
+      session = loaded.session;
+      messages = loaded.messages;
+      console.log(`\x1b[32mResumed session ${session.id.slice(0, 8)}... (${messages.length} messages)\x1b[0m`);
+    } else {
+      console.log(`\x1b[31mSession ${options.sessionId} not found, starting new\x1b[0m`);
+      session = createSession("REPL session", { cwd, model, maxTurns, skipPermissions });
+    }
+  } else if (options.resume && !options.sessionId) {
+    const sessions = await sessionStore.list()
+    if (sessions.length === 0) 
+      {
+      console.log("\x1b[33mNo previous sessions found, starting new\x1b[0m");
+      session = createSession("REPL session", { cwd, model, maxTurns, skipPermissions });
+    } 
+    else 
+      {
+      const latest = sessions[0];
+      if (!latest) {
+        session = createSession("REPL session", { cwd, model, maxTurns, skipPermissions });
+      } else {
+        const loaded = await resumeSession(latest.id, {
+        model: options.model,
+        maxTurns: options.maxTurns,
+        skipPermissions: options.skipPermissions,
+        cwd: options.cwd
+      });
+      if (loaded) {
+          session = loaded.session;
+          messages = loaded.messages;
+          console.log(`\x1b[32mResumed latest session ${session.id.slice(0, 8)}... (${messages.length} messages)\x1b[0m`);
+        } else {
+          session = createSession("REPL session", { cwd, model, maxTurns, skipPermissions });
+        }
+      }
+    }
+  } else {
+    session = createSession("REPL session", { cwd, model, maxTurns, skipPermissions });
+  }
+
   const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -157,7 +241,9 @@ export async function runRepl(options: {
     maxTurns,
     skipPermissions,
     history: [],
-    rl
+    rl,
+    messages,
+    tools
   };
 
   printBanner();
@@ -165,6 +251,11 @@ export async function runRepl(options: {
   console.log(`\x1b[90mModel:\x1b[0m ${model}`);
   console.log(`\x1b[90mMax turns:\x1b[0m ${maxTurns}`);
   console.log(`\x1b[90mSkip perms:\x1b[0m ${skipPermissions}`);
+  console.log(`\x1b[90mSession:\x1b[0m ${session.id.slice(0, 8)}...`);
+  if (messages.length > 0) 
+    {
+      console.log(`\x1b[90mRestored:\x1b[0m ${messages.length} messages`)
+    }
   console.log("");
 
   const onToolEvent = (event: ToolEvent): void => {
@@ -174,6 +265,7 @@ export async function runRepl(options: {
       const prefix = event.ok ? "\x1b[32m  → ok\x1b[0m" : "\x1b[31m  → FAILED\x1b[0m";
       console.log(`${prefix} \x1b[90m${event.preview.split("\n")[0] ?? ""}\x1b[0m`);
     }
+    ctx.tools.push(event)
   };
 
   return new Promise((resolve) => {
@@ -196,7 +288,9 @@ export async function runRepl(options: {
         }
       }
       ctx.history.push(trimmed);
+      ctx.messages.push(toChatMessage("user", trimmed, ctx.session.id));
       try {
+        let assistantText = "";
         for await (const delta of runPrompt(trimmed, {
           model: ctx.model,
           maxTurns: ctx.maxTurns,
@@ -204,9 +298,14 @@ export async function runRepl(options: {
           cwd: ctx.cwd,
           onToolEvent,
         })) {
+          assistantText += delta;
           process.stdout.write(delta);
         }
         process.stdout.write("\n");
+        if (assistantText) {
+          ctx.messages.push(toChatMessage("assistant", assistantText, ctx.session.id));
+        }
+        await saveSession(ctx);
       } catch (error) {
         const msg = error instanceof Error ? error.message : "unknown error";
         console.log(`\x1b[31mError: ${msg}\x1b[0m`);
@@ -221,7 +320,8 @@ export async function runRepl(options: {
       readLine();
     });
 
-    rl.on("close", () => {
+    rl.on("close", async () => {
+      await saveSession(ctx);
       console.log("bye");
       resolve();
     });
