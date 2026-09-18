@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import type { Session, TokenUsage, ToolEvent } from "@riox/protocol";
 import { executeTool, safeSummarize, TOOL_MAP, toOpenAITools } from "./tools/registry.js";
 import type { ToolContext, ToolInput } from "./tools/types.js";
+import { CODING_SYSTEM_PROMPT } from "./repl.js";
 
 export const ENGINE = "openrouter" as const;
 export const VERSION = "0.1.0";
@@ -10,7 +11,7 @@ export const DEFAULT_MAX_TURNS = 10;
 
 const BASE_URL = "https://openrouter.ai/api/v1";
 const MAX_TOKENS = 2048;
-const SYSTEM_PROMPT = "You are riox, a concise coding assistant with shell, file, and web tools.";
+const SYSTEM_PROMPT = CODING_SYSTEM_PROMPT;
 
 export function resolveModel(override?: string): string {
   if (override !== undefined && override.trim() !== "") return override.trim();
@@ -167,3 +168,5 @@ export async function* runPrompt(prompt: string, options: RunOptions = {}): Asyn
     messages.push(...toolMessages);
   }
 }
+
+export { runRepl } from "./repl.js";
