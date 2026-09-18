@@ -1,8 +1,9 @@
 import OpenAI from "openai";
-import type { Session, TokenUsage, ToolEvent } from "@riox/protocol";
+import type { Session, TokenUsage, ToolEvent, ChatMessage } from "@riox/protocol";
 import { executeTool, safeSummarize, TOOL_MAP, toOpenAITools } from "./tools/registry.js";
 import type { ToolContext, ToolInput } from "./tools/types.js";
 import { CODING_SYSTEM_PROMPT } from "./repl.js";
+import { sessionStore } from "./session.js";
 
 export const ENGINE = "openrouter" as const;
 export const VERSION = "0.1.0";
@@ -32,25 +33,31 @@ export interface RunOptions {
 function readApiKey(): string {
   const key = process.env.OPENROUTER_API_KEY;
   if (key === undefined || key.trim() === "") {
-    throw new Error("OPENROUTER_API_KEY is not set")
+    throw new Error("OPENROUTER_API_KEY is not set — add it to .env (see .env.example)");
   }
   return key.trim();
-  
 }
 
 function describeError(error: unknown): string {
   const status = (error as { status?: unknown }).status;
-  if (status === 401) return "OpenRouter rejected the key (401) - check OPENROUTER_API_KEY";
+  if (status === 401) return "OpenRouter rejected the key (401) — check OPENROUTER_API_KEY";
   if (status === 402) return "OpenRouter out of credits (402)";
-  if (status === 429) return "OpenRouter rate limit (429) - free tier, wait and retry";
+  if (status === 429) return "OpenRouter rate limit (429) — free tier, wait and retry";
   return error instanceof Error ? error.message : "unknown error";
 }
 
-export function createSession(title = "Untitled session"): Session {
+export function createSession(
+  title = "Untitled session",
+  options: { cwd?: string; model?: string; maxTurns?: number; skipPermissions?: boolean } = {}
+): Session {
   return {
     id: crypto.randomUUID(),
     title,
     createdAt: new Date().toISOString(),
+    cwd: options.cwd ?? process.cwd(),
+    model: options.model ?? resolveModel(),
+    maxTurns: options.maxTurns ?? DEFAULT_MAX_TURNS,
+    skipPermissions: options.skipPermissions ?? false,
   };
 }
 
@@ -68,12 +75,22 @@ function parseInput(raw: string): ToolInput {
   return value as ToolInput;
 }
 
+function toChatMessage(role: "user" | "assistant", content: string, sessionId: string): ChatMessage {
+  return {
+    id: crypto.randomUUID(),
+    sessionId,
+    role,
+    content,
+    createdAt: new Date().toISOString(),
+  };
+}
+
 export async function* runPrompt(prompt: string, options: RunOptions = {}): AsyncGenerator<string> {
-  if (prompt.trim() === "") throw new Error('empty prompt — usage: riox -p "hellocheck"');
+  if (prompt.trim() === "") throw new Error('empty prompt — usage: riox -p "hello"');
   const client = new OpenAI({
     baseURL: BASE_URL,
     apiKey: readApiKey(),
-    defaultHeaders: { "HTTP-Referer": "https://riox.local", "X-Title": "riox" }
+    defaultHeaders: { "HTTP-Referer": "https://riox.local", "X-Title": "riox" },
   });
   const model = resolveModel(options.model);
   const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
@@ -169,4 +186,14 @@ export async function* runPrompt(prompt: string, options: RunOptions = {}): Asyn
   }
 }
 
+export async function resumeSession(
+  sessionId: string,
+  options: RunOptions = {}
+): Promise<{ session: Session; messages: ChatMessage[] } | null> {
+  const loaded = await sessionStore.load(sessionId);
+  if (!loaded) return null;
+  return { session: loaded.meta, messages: loaded.messages };
+}
+
+export { sessionStore } from "./session.js";
 export { runRepl } from "./repl.js";

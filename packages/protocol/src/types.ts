@@ -6,6 +6,12 @@ export interface Session {
   id: string;
   title: string;
   createdAt: string;
+  cwd?: string;
+  model?: string;
+  maxTurns?: number;
+  skipPermissions?: boolean;
+  messageCount?: number;
+  lastTurnAt?: string;
 }
 
 export interface ChatMessage {
