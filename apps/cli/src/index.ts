@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { DEFAULT_MAX_TURNS, ENGINE, resolveModel, runPrompt } from "@riox/agent";
+import { DEFAULT_MAX_TURNS, ENGINE, resolveModel, runPrompt, runRepl } from "@riox/agent";
 import type { TokenUsage, ToolEvent } from "@riox/protocol";
 
 const VERSION = "0.1.0";
@@ -13,14 +13,19 @@ interface ToolTrace {
   preview: string;
 }
 
+function isInteractive(): boolean {
+  return process.stdin.isTTY === true && process.stdout.isTTY === true;
+}
+
 function printHelp(): void {
   console.log(`riox ${VERSION} - coding agent
 
 Usage:
-  riox --version                  Print version
-  riox --help                     Show this help
-  riox --health                   Check the local server (/health)
-  riox -p, --print <prompt>       Run one prompt through the engine and exit
+  riox                       Start interactive REPL (requires TTY)
+  riox --version             Print version
+  riox --help                Show this help
+  riox --health              Check the local server (/health)
+  riox -p, --print <prompt>  Run one prompt through the engine and exit
 
 Options:
   --model <id>                    Model override (default: RIOX_MODEL or built-in)
@@ -29,6 +34,7 @@ Options:
   --dangerously-skip-permissions  Approve all tools without asking
 
 Examples:
+  riox
   riox -p "hello riox"
   riox -p "list src files" --max-turns 5
   riox -p "hi" --output-format json
@@ -105,7 +111,16 @@ function parseMaxTurns(value: string | undefined): number {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const head = args[0];
-  if (head === undefined || head === "--help" || head === "-h") {
+
+  if (head === undefined) {
+    if (!isInteractive()) {
+      throw new Error("interactive REPL requires a TTY — use -p/--print for non-interactive use");
+    }
+    await runRepl({});
+    return;
+  }
+
+  if (head === "--help" || head === "-h") {
     printHelp();
     return;
   }
