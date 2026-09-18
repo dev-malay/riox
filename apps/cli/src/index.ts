@@ -22,6 +22,9 @@ function printHelp(): void {
 
 Usage:
   riox                       Start interactive REPL (requires TTY)
+  riox --continue            Resume the most recent session
+  riox --resume [id]         Resume a specific session (or pick from list)
+  riox --session-id <id>     Start new session with specific ID
   riox --version             Print version
   riox --help                Show this help
   riox --health              Check the local server (/health)
@@ -35,6 +38,9 @@ Options:
 
 Examples:
   riox
+  riox --continue
+  riox --resume
+  riox --resume abc123
   riox -p "hello riox"
   riox -p "list src files" --max-turns 5
   riox -p "hi" --output-format json
@@ -112,11 +118,47 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const head = args[0];
 
+  let model: string | undefined;
+  let maxTurns = DEFAULT_MAX_TURNS;
+  let skipPermissions = false;
+  let sessionId: string | undefined;
+  let shouldResume = false;
+  let shouldContinue = false;
+  let format: OutputFormat = "text";
+
+  const rest = args.slice(1);
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i];
+    if (arg === "--model") {
+      const value = rest[i + 1];
+      if (value === undefined || value === "") throw new Error("--model needs a value");
+      model = value;
+      i++;
+    } else if (arg === "--output-format") {
+      const value = rest[i + 1];
+      if (value !== "text" && value !== "json") {
+        throw new Error('--output-format must be "text" or "json"');
+      }
+      format = value;
+      i++;
+    } else if (arg === "--max-turns") {
+      maxTurns = parseMaxTurns(rest[i + 1]);
+      i++;
+    } else if (arg === "--dangerously-skip-permissions") {
+      skipPermissions = true;
+    } else if (arg === "--session-id") {
+      const value = rest[i + 1];
+      if (value === undefined || value === "") throw new Error("--session-id needs a value");
+      sessionId = value;
+      i++;
+    }
+  }
+
   if (head === undefined) {
     if (!isInteractive()) {
       throw new Error("interactive REPL requires a TTY — use -p/--print for non-interactive use");
     }
-    await runRepl({});
+    await runRepl({ model, maxTurns, skipPermissions, sessionId, resume: shouldResume });
     return;
   }
 
@@ -132,33 +174,31 @@ async function main(): Promise<void> {
     await cmdHealth();
     return;
   }
+  if (head === "--continue") {
+    shouldContinue = true;
+    if (!isInteractive()) {
+      throw new Error("--continue requires a TTY");
+    }
+    await runRepl({ model, maxTurns, skipPermissions, resume: true });
+    return;
+  }
+  if (head === "--resume") {
+    shouldResume = true;
+    if (!isInteractive()) {
+      throw new Error("--resume requires a TTY");
+    }
+    const resumeId = args[1] && !args[1].startsWith("-") ? args[1] : undefined;
+    await runRepl({ model, maxTurns, skipPermissions, sessionId: resumeId, resume: true });
+    return;
+  }
+  if (head === "--session-id") {
+    throw new Error("--session-id is an option, not a command. Use: riox --session-id <id>");
+  }
   if (head === "-p" || head === "--print") {
-    let model: string | undefined;
-    let format: OutputFormat = "text";
-    let maxTurns = DEFAULT_MAX_TURNS;
-    let skipPermissions = false;
     const promptParts: string[] = [];
-    const rest = args.slice(1);
     for (let i = 0; i < rest.length; i++) {
       const arg = rest[i];
-      if (arg === "--model") {
-        const value = rest[i + 1];
-        if (value === undefined || value === "") throw new Error("--model needs a value");
-        model = value;
-        i++;
-      } else if (arg === "--output-format") {
-        const value = rest[i + 1];
-        if (value !== "text" && value !== "json") {
-          throw new Error('--output-format must be "text" or "json"');
-        }
-        format = value;
-        i++;
-      } else if (arg === "--max-turns") {
-        maxTurns = parseMaxTurns(rest[i + 1]);
-        i++;
-      } else if (arg === "--dangerously-skip-permissions") {
-        skipPermissions = true;
-      } else if (arg !== undefined) {
+      if (arg !== undefined) {
         promptParts.push(arg);
       }
     }
