@@ -1,159 +1,303 @@
-# Turborepo starter
-
-This Turborepo starter is maintained by the Turborepo core team.
-
-## Using this example
-
-Run the following command:
-
-```sh
-npx create-turbo@latest
+```
+██████╗ ██╗ ██████╗ ██╗  ██╗
+██╔══██╗██║██╔═══██╗╚██╗██╔╝
+██████╔╝██║██║   ██║ ╚███╔╝
+██╔══██╗██║██║   ██║ ██╔██╗
+██║  ██║██║╚██████╔╝██╔╝ ██╗
+╚═╝  ╚═╝╚═╝ ╚═════╝ ╚═╝  ╚═╝
 ```
 
-## What's inside?
+A terminal coding agent built with Bun, TypeScript, and OpenRouter. Uses a streaming tool-call loop for autonomous code changes, a permission engine for safe execution, JSONL sessions for persistence, and includes a WebSocket server plus shared protocol for remote clients.
 
-This Turborepo includes the following packages/apps:
+> [!NOTE]
+> Work in progress. The CLI, agent loop, permissions, sessions, and server are working. Docs site, UI package, and tests are still starter-template stubs.
 
-### Apps and Packages
+---
 
-- `docs`: a [Next.js](https://nextjs.org/) app
-- `web`: another [Next.js](https://nextjs.org/) app
-- `@repo/ui`: a stub React component library shared by both `web` and `docs` applications
-- `@repo/eslint-config`: `eslint` configurations (includes `@next/eslint-plugin-next` and `eslint-config-prettier`)
-- `@repo/typescript-config`: `tsconfig.json`s used throughout the monorepo
+## Architecture
 
-Each package/app is 100% [TypeScript](https://www.typescriptlang.org/).
+```mermaid
+flowchart LR
+    subgraph CLI
+        REPL["Interactive REPL<br/>readline + slash cmds"]
+        PRINT["One-shot<br/>riox -p"]
+    end
 
-### Utilities
+    subgraph Agent
+        LOOP["runPrompt loop<br/>stream → tool_calls → execute"]
+        PERM["Permission Engine<br/>allow · ask · deny"]
+        TOOLS["Tools<br/>Read · Glob · Grep · WebFetch<br/>TodoWrite · Write · Edit · Bash"]
+    end
 
-This Turborepo has some additional tools already setup for you:
+    subgraph Model
+        OR["OpenRouter<br/>OpenAI-SDK streaming"]
+    end
 
-- [TypeScript](https://www.typescriptlang.org/) for static type checking
-- [ESLint](https://eslint.org/) for code linting
-- [Prettier](https://prettier.io) for code formatting
+    subgraph Server
+        WS["WS Server<br/>:3101"]
+    end
 
-### Build
+    subgraph Shared
+        PROTO[("Protocol<br/>Session · Message<br/>Client/Server events")]
+    end
 
-To build all apps and packages, run the following command:
+    subgraph Persistence
+        SES[("~/.riox/sessions<br/>JSONL per session")]
+        CFG[("~/.riox/permissions.json<br/>user rules")]
+    end
 
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
-
-```sh
-cd my-turborepo
-turbo build
+    REPL --> LOOP
+    PRINT --> LOOP
+    LOOP -->|chat.completions stream| OR
+    OR -->|tool_calls| LOOP
+    LOOP --> PERM
+    PERM -->|allow| TOOLS
+    PERM -->|ask| REPL
+    TOOLS -->|tool messages| LOOP
+    LOOP -->|save| SES
+    PERM -->|rules| CFG
+    WS -->|runPrompt| LOOP
+    PROTO --> CLI
+    PROTO --> WS
+    PROTO --> LOOP
 ```
 
-Without global `turbo`, use your package manager:
+---
 
-```sh
-cd my-turborepo
-npx turbo build
-bun exec turbo build
-bun exec turbo build
+## Features
+
+### Core Agent Loop
+- **Streaming Tool-Call Loop** — `runPrompt()` streams chat completions from OpenRouter, accumulates `tool_calls`, executes them via the tool registry, and feeds `tool` messages back until the model answers directly (default `maxTurns: 10`, `MAX_TOKENS: 2048`).
+- **REPL + One-Shot** — Interactive `readline` REPL with slash commands and per-turn session save, or `riox -p "prompt"` for single-shot stdout/JSON execution.
+- **Sessions** — Every run persists to `~/.riox/sessions/<id>.jsonl`. Resume with `--continue` / `--resume [id]`, list/fork/delete via the session store.
+- **Model Flexibility** — Any OpenRouter model id via `--model` or `RIOX_MODEL` (default `nvidia/nemotron-3-ultra-550b-a55b:free`).
+
+### Permissions
+- **Three Decisions** — Every tool call evaluates to `allow`, `ask` (interactive `y/n/always/never`), or `deny`. Read-only tools (`Read`, `Glob`, `Grep`, `WebFetch`, `TodoWrite`) auto-allow; `Write`, `Edit`, and mutating `Bash` ask by default.
+- **Deny-by-Default Destructive Shell** — `rm*`, `mv*`, `chmod*`, `chown*`, `sudo*`, and pipe-to-shell (`curl|sh`) are denied even in ask mode.
+- **Four Modes** — `default`, `acceptEdits` (auto-allow Write/Edit), `plan` (deny Write/Edit/Bash — research only), `bypass` (allow all, same as `--dangerously-skip-permissions`).
+- **Persistent Rules** — `always`/`never` answers are stored in `~/.riox/permissions.json`. CLI flags `--allow-tool tool[@pattern]` / `--deny-tool tool[@pattern]` add per-run rules.
+- **Cwd-Jailed Tools** — File tools resolve inside the working directory; outputs are capped (30k) so runaway commands can't flood the context.
+
+### Tools
+| Tool | Inputs | Description |
+|---|---|---|
+| `Read` | `path, offset?, limit?` | Read a file or directory listing |
+| `Glob` | `pattern` | Fast file pattern matching (`**/*.ts`) |
+| `Grep` | `pattern, include?, path?` | Regex content search, skips `node_modules/.git/dist` |
+| `WebFetch` | `url` | Fetch a URL, HTML stripped to text (20s timeout) |
+| `TodoWrite` | `todos[{content, status, priority?}]` | Structured task list (max 20, in-memory per run) |
+| `Write` | `path, content` | Create/overwrite a file (asks approval) |
+| `Edit` | `path, oldString, newString, replaceAll?` | Exact-match replacement, rejects ambiguous matches |
+| `Bash` | `command, timeoutMs?` | Shell exec (`sh -c`/`cmd /c`, default 120s, capped output) |
+
+### Server + Protocol
+- **WS Server `:3101`** — Thin Bun wrapper over the same `runPrompt()`. `GET /health` plus `GET /v1/stream` WebSocket upgrade; `session.new` → `session.created`, `chat.send` streams `tool.start / tool.result`, `chat.delta`, `chat.done`.
+- **Shared Protocol** — `Session`, `ChatMessage`, `TokenUsage`, `PermissionDecision`, `PermissionMode`, `PermissionRule` types plus `ClientEvent`/`ServerEvent` framing with `parse`/`serialize` helpers, consumed by CLI, server, and agent.
+
+### CLI
+| Invocation | Description |
+|---|---|
+| `riox` | Interactive REPL (requires TTY) |
+| `riox --continue` | REPL resumed from the latest session |
+| `riox --resume [id]` | REPL resumed from session `id` (or latest if omitted) |
+| `riox -p, --print <prompt>` | One-shot run, streams text to stdout |
+| `riox --health` | Check the local server's `/health` |
+| `riox --version, -v` | Print version + engine |
+| `riox --help, -h` | Print help |
+
+---
+
+## Getting Started
+
+### Prerequisites
+- Node.js 24+
+- Bun 1.3+
+- An OpenRouter API key
+
+### Setup
+
+```bash
+# Install dependencies
+bun install
+
+# Configure environment
+cp .env.example .env
+# Edit .env with your OpenRouter key
 ```
 
-You can build a specific package by using a [filter](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters):
-
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
-
-```sh
-turbo build --filter=docs
+Required root `.env` variables:
+```
+OPENROUTER_API_KEY=
+RIOX_MODEL=
 ```
 
-Without global `turbo`:
+`RIOX_MODEL` is optional — any OpenRouter model id, defaults to `nvidia/nemotron-3-ultra-550b-a55b:free`. Flag `--model` overrides both.
 
-```sh
-npx turbo build --filter=docs
-bun exec turbo build --filter=docs
-bun exec turbo build --filter=docs
+### Start the REPL
+
+```bash
+bun --filter cli dev
+# or
+riox
 ```
 
-### Develop
+Opens the interactive agent at your shell. Slash commands: `/help /clear /compact /model /max-turns /skip-perms /status /exit`.
 
-To develop all apps and packages, run the following command:
+### One-Shot Prompting
 
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
-
-```sh
-cd my-turborepo
-turbo dev
+```bash
+riox -p "explain what this repo does"
+riox -p "find the auth middleware" --output-format json --max-turns 5
 ```
 
-Without global `turbo`, use your package manager:
+Streams text to stdout, or emits `{content, model, usage, tools}` with `--output-format json`.
 
-```sh
-cd my-turborepo
-npx turbo dev
-bun exec turbo dev
-bun exec turbo dev
+### Start the Server
+
+```bash
+bun --filter server dev
 ```
 
-You can develop a specific package by using a [filter](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters):
+Serves `http://localhost:3101` (`/health`, `/v1/stream` WebSocket). No auth — local use only.
 
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
+### Start the Docs Site
 
-```sh
-turbo dev --filter=web
+```bash
+bun --filter docs dev
 ```
 
-Without global `turbo`:
+Opens the Next.js docs starter at `http://localhost:3001`. (Template stub — real docs pending.)
 
-```sh
-npx turbo dev --filter=web
-bun exec turbo dev --filter=web
-bun exec turbo dev --filter=web
+---
+
+## Project Structure
+
+```
+riox/
+├── apps/
+│   ├── cli/                    # `riox` binary (REPL + one-shot + flags)
+│   │   └── src/
+│   │       ├── index.ts        # Arg parsing, --print/--resume/--health dispatch
+│   │       └── permissions.ts  # y/n/always/never approval prompt
+│   ├── server/                 # Bun WS server :3101 over runPrompt()
+│   │   └── src/index.ts        # /health, /v1/stream upgrade, chat.send handler
+│   └── docs/                   # Next.js docs starter (stub)
+│       └── app/page.tsx        # Default create-next-app page
+├── packages/
+│   ├── agent/                  # Agentic loop + tools + sessions + permissions
+│   │   └── src/
+│   │       ├── index.ts        # runPrompt(), OpenRouter client, model resolve
+│   │       ├── repl.ts         # Interactive REPL + slash commands
+│   │       ├── session.ts      # ~/.riox/sessions/*.jsonl store
+│   │       ├── permissions.ts  # PermissionEngine + default rules + modes
+│   │       └── tools/
+│   │           ├── registry.ts # TOOLS, TOOL_MAP, OpenAI function schemas
+│   │           ├── types.ts    # ToolDef, ToolContext (cwd-jail)
+│   │           ├── files.ts    # Read, Glob, Grep
+│   │           ├── web.ts      # WebFetch
+│   │           ├── todos.ts    # TodoWrite
+│   │           ├── mutate.ts   # Write, Edit
+│   │           └── exec.ts     # Bash
+│   ├── protocol/               # Shared Session/Message/event types + WS framing
+│   │   └── src/
+│   │       ├── types.ts        # EngineName, Session, ChatMessage, permissions
+│   │       └── events.ts       # ClientEvent, ServerEvent, parse/serialize
+│   ├── ui/                     # Shared React stub library (Button, Card, Code)
+│   ├── eslint-config/          # Shared eslint configs
+│   └── typescript-config/      # Shared tsconfigs
+├── .env.example                # OPENROUTER_API_KEY, RIOX_MODEL
+└── turbo.json                  # build/dev/lint/check-types pipelines
 ```
 
-### Remote Caching
+---
 
-> [!TIP]
-> Vercel Remote Cache is free for all plans. Get started today at [vercel.com](https://vercel.com/signup?utm_source=remote-cache-sdk&utm_campaign=free_remote_cache).
+## CLI Documentation
 
-Turborepo can use a technique known as [Remote Caching](https://turborepo.dev/docs/core-concepts/remote-caching) to share cache artifacts across machines, enabling you to share build caches with your team and CI/CD pipelines.
+### `riox -p, --print <prompt>`
 
-By default, Turborepo will cache locally. To enable Remote Caching you will need an account with Vercel. If you don't have an account you can [create one](https://vercel.com/signup?utm_source=turborepo-examples), then enter the following commands:
+One-shot execution. Streams the answer text to stdout.
 
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed (recommended):
-
-```sh
-cd my-turborepo
-turbo login
+```bash
+riox -p "list all API routes in apps/server" --model "anthropic/claude-sonnet-4"
 ```
 
-Without global `turbo`, use your package manager:
-
-```sh
-cd my-turborepo
-npx turbo login
-bun exec turbo login
-bun exec turbo login
+**Response (`--output-format json`)**
+```json
+{
+  "content": "GET /health, GET /v1/stream ...",
+  "model": "anthropic/claude-sonnet-4",
+  "usage": { "promptTokens": 1200, "completionTokens": 300, "totalTokens": 1500 },
+  "tools": ["Glob", "Grep", "Read"]
+}
 ```
 
-This will authenticate the Turborepo CLI with your [Vercel account](https://vercel.com/docs/concepts/personal-accounts/overview).
+Useful flags: `--max-turns <n>` (default 10), `--permission-mode default|acceptEdits|plan|bypass`, `--allow-tool` / `--deny-tool tool[@pattern]`, `--session-id <id>`.
 
-Next, you can link your Turborepo to your Remote Cache by running the following command from the root of your Turborepo:
+### `riox --resume [id]`
 
-With [global `turbo`](https://turborepo.dev/docs/getting-started/installation#global-installation) installed:
-
-```sh
-turbo link
+```bash
+riox --resume
+riox --resume 7f3a2c1e-85b4-4e3f-a631-f542289c4b7b
 ```
 
-Without global `turbo`:
+Reopens the REPL with prior session history loaded. `--continue` is shorthand for the latest session.
 
-```sh
-npx turbo link
-bun exec turbo link
-bun exec turbo link
+### `riox --health`
+
+```bash
+riox --health
 ```
 
-## Useful Links
+**Response (200 — Server running)**
+```json
+{
+  "ok": true,
+  "engine": "openrouter",
+  "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "version": "0.1.0",
+  "sessions": 3,
+  "time": "2026-09-19T12:00:00.000Z"
+}
+```
 
-Learn more about the power of Turborepo:
+---
 
-- [Tasks](https://turborepo.dev/docs/crafting-your-repository/running-tasks)
-- [Caching](https://turborepo.dev/docs/crafting-your-repository/caching)
-- [Remote Caching](https://turborepo.dev/docs/core-concepts/remote-caching)
-- [Filtering](https://turborepo.dev/docs/crafting-your-repository/running-tasks#using-filters)
-- [Configuration Options](https://turborepo.dev/docs/reference/configuration)
-- [CLI Usage](https://turborepo.dev/docs/reference/command-line-reference)
+## Protocol Events
+
+Clients send `ClientEvent` JSON over the `/v1/stream` WebSocket; the server streams back `ServerEvent`s.
+
+| Direction | Event | Payload | Description |
+|---|---|---|---|
+| → | `session.new` | `{title?}` | Create a session, replies `session.created` |
+| → | `chat.send` | `{prompt, sessionId?}` | Run the agent loop, streams deltas + tool events |
+| ← | `session.created` | `{session}` | New session record |
+| ← | `chat.delta` | `{sessionId, messageId, delta}` | Streaming text chunk |
+| ← | `chat.done` | `{sessionId, messageId, content}` | Final assembled answer |
+| ← | `tool.start` | `{name, summary, permission?}` | A tool call began |
+| ← | `tool.result` | `{name, ok, preview, permission?}` | A tool call finished |
+| ← | `error` | `{message}` | Malformed event or loop failure |
+
+---
+
+## Agentic Loop
+
+```
+prompt → model (stream) → tool_calls?
+  ├─ no  → final answer → save session → done
+  └─ yes → permission evaluate per call
+       ├─ allow → execute tool → feed result back → model
+       ├─ ask   → prompt user (y/n/always/never) → allow/deny
+       └─ deny  → feed denial back → model
+  (repeats until direct answer or maxTurns)
+```
+
+- **Text deltas** stream to the caller as they arrive
+- **Tool outputs** re-enter context as `tool` messages, so the model can iterate (read → edit → verify)
+- **Permissions** persist per session; `always`/`never` answers are remembered in `~/.riox/permissions.json`
+
+---
+
+## License
+
+MIT
